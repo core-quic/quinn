@@ -38,6 +38,12 @@ impl Type {
     }
 }
 
+impl From<Type> for u64 {
+    fn from(value: Type) -> Self {
+        value.0
+    }
+}
+
 impl coding::Codec for Type {
     fn decode<B: Buf>(buf: &mut B) -> coding::Result<Self> {
         Ok(Self(buf.get_var()?))
@@ -135,7 +141,7 @@ frame_types! {
 const STREAM_TYS: RangeInclusive<u64> = RangeInclusive::new(0x08, 0x0f);
 const DATAGRAM_TYS: RangeInclusive<u64> = RangeInclusive::new(0x30, 0x31);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Frame {
     Padding,
     Ping,
@@ -563,6 +569,7 @@ impl Iter {
     }
 
     fn try_next(&mut self) -> Result<Frame, IterErr> {
+        // PARSE HERE!!!
         let ty = self.bytes.get::<Type>()?;
         self.last_ty = Some(ty);
         Ok(match ty {

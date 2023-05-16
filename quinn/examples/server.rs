@@ -37,6 +37,9 @@ struct Opt {
     /// Address to listen on
     #[clap(long = "listen", default_value = "[::1]:4433")]
     listen: SocketAddr,
+    /// The plugins to load.
+    #[clap(long = "plugin")]
+    plugin_paths: Vec<PathBuf>,
 }
 
 fn main() {
@@ -132,6 +135,7 @@ async fn run(options: Opt) -> Result<()> {
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(server_crypto));
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     transport_config.max_concurrent_uni_streams(0_u8.into());
+    transport_config.set_plugin_paths(&options.plugin_paths);
     if options.stateless_retry {
         server_config.use_retry(true);
     }

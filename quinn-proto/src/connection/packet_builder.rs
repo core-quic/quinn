@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 use rand::Rng;
 use tracing::{trace, trace_span};
 
-use super::{spaces::SentPacket, Connection, SentFrames};
+use super::{spaces::SentPacket, CoreConnection, SentFrames};
 use crate::{
     frame::{self, Close},
     packet::{Header, LongType, PacketNumber, PartialEncode, SpaceId, FIXED_BIT},
@@ -36,7 +36,7 @@ impl PacketBuilder {
         buffer_capacity: usize,
         datagram_start: usize,
         ack_eliciting: bool,
-        conn: &mut Connection,
+        conn: &mut CoreConnection,
         version: u32,
     ) -> Option<Self> {
         // Initiate key update if we're approaching the confidentiality limit
@@ -165,7 +165,7 @@ impl PacketBuilder {
     pub(super) fn finish_and_track(
         self,
         now: Instant,
-        conn: &mut Connection,
+        conn: &mut CoreConnection,
         sent: Option<SentFrames>,
         buffer: &mut BytesMut,
     ) {
@@ -210,7 +210,7 @@ impl PacketBuilder {
     }
 
     /// Encrypt packet, returning the length of the packet and whether padding was added
-    pub(super) fn finish(self, conn: &mut Connection, buffer: &mut BytesMut) -> (usize, bool) {
+    pub(super) fn finish(self, conn: &mut CoreConnection, buffer: &mut BytesMut) -> (usize, bool) {
         let pad = buffer.len() < self.min_size;
         if pad {
             trace!("PADDING * {}", self.min_size - buffer.len());

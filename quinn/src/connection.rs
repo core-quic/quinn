@@ -1110,7 +1110,9 @@ impl Drop for State {
 
 impl fmt::Debug for State {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("State").field("inner", &self.inner).finish()
+        f.debug_struct("State")
+            .field("inner", &*self.inner)
+            .finish()
     }
 }
 

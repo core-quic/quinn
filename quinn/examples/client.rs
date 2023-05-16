@@ -39,6 +39,10 @@ struct Opt {
     /// Simulate NAT rebinding after connecting
     #[clap(long = "rebind")]
     rebind: bool,
+
+    /// The plugins to load.
+    #[clap(long = "plugin")]
+    plugin_paths: Vec<PathBuf>,
 }
 
 fn main() {
@@ -95,7 +99,11 @@ async fn run(options: Opt) -> Result<()> {
         client_crypto.key_log = Arc::new(rustls::KeyLogFile::new());
     }
 
-    let client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.set_plugin_paths(&options.plugin_paths);
+    client_config.transport_config(Arc::new(transport_config));
+
     let mut endpoint = quinn::Endpoint::client("[::]:0".parse().unwrap())?;
     endpoint.set_default_client_config(client_config);
 

@@ -666,6 +666,16 @@ impl StreamsState {
         self.max_data = self.max_data.max(n.into());
     }
 
+    /// Returns the current max_data value
+    pub(crate) fn max_data(&self) -> u64 {
+        self.max_data
+    }
+
+    /// Sets the max_data value
+    pub(crate) fn set_max_data(&mut self, v: u64) {
+        self.max_data = v;
+    }
+
     pub(crate) fn received_max_stream_data(
         &mut self,
         id: StreamId,

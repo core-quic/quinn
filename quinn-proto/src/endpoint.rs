@@ -638,10 +638,10 @@ impl Endpoint {
         server_config: Option<Arc<ServerConfig>>,
         transport_config: Arc<TransportConfig>,
     ) -> (ConnectionHandle, Connection) {
-        let conn = Connection::new(
+        let mut conn = Connection::new(
             self.config.clone(),
             server_config,
-            transport_config,
+            transport_config.clone(),
             init_cid,
             loc_cid,
             rem_cid,
@@ -653,6 +653,9 @@ impl Endpoint {
             version,
             self.allow_mtud,
         );
+        for pfname in &transport_config.plugin_paths {
+            conn.insert_plugin(pfname).expect("cannot insert plugin");
+        }
 
         let id = self.connections.insert(ConnectionMeta {
             init_cid,

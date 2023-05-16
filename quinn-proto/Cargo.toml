@@ -26,7 +26,9 @@ log = ["tracing/log"]
 
 [dependencies]
 arbitrary = { version = "1.0.1", features = ["derive"], optional = true }
+bincode = "1"
 bytes = "1"
+pluginop = { path = "../../pluginop/lib" }
 rustc-hash = "1.1"
 rand = "0.8"
 ring = { version = "0.16.7", optional = true }

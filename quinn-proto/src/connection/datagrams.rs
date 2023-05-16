@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 use tracing::{debug, trace};
 
-use super::Connection;
+use super::CoreConnection;
 use crate::{
     frame::{Datagram, FrameStruct},
     packet::SpaceId,
@@ -13,7 +13,7 @@ use crate::{
 
 /// API to control datagram traffic
 pub struct Datagrams<'a> {
-    pub(super) conn: &'a mut Connection,
+    pub(super) conn: &'a mut CoreConnection,
 }
 
 impl<'a> Datagrams<'a> {

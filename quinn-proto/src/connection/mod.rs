@@ -10,6 +10,8 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use frame::StreamMetaVec;
+use pluginop::common::PluginOp;
+use pluginop::pluginop_macro::pluginop_result_param;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
@@ -53,6 +55,8 @@ use packet_builder::PacketBuilder;
 mod paths;
 use paths::PathData;
 pub use paths::RttEstimator;
+
+mod plugin;
 
 mod send_buffer;
 
@@ -120,7 +124,10 @@ use timer::{Timer, TimerTable};
 /// with events of the same [`Instant`] may be interleaved in any order with a
 /// call to [`handle_event`](Self::handle_event) at that same instant; however
 /// events or timeouts with different instants must not be interleaved.
-pub struct Connection {
+pub struct CoreConnection {
+    /// The pluginized connection.
+    pc: Option<pluginop::ParentReferencer<PluginizableConnection<Self>>>,
+
     endpoint_config: Arc<EndpointConfig>,
     server_config: Option<Arc<ServerConfig>>,
     config: Arc<TransportConfig>,
@@ -222,8 +229,8 @@ pub struct Connection {
     version: u32,
 }
 
-impl Connection {
-    pub(crate) fn new(
+impl CoreConnection {
+    fn new(
         endpoint_config: Arc<EndpointConfig>,
         server_config: Option<Arc<ServerConfig>>,
         config: Arc<TransportConfig>,
@@ -255,6 +262,7 @@ impl Connection {
         let mut rng = StdRng::from_entropy();
         let path_validated = server_config.as_ref().map_or(true, |c| c.use_retry);
         let mut this = Self {
+            pc: None,
             endpoint_config,
             server_config,
             crypto,
@@ -2134,9 +2142,13 @@ impl Connection {
         let state = match self.state {
             State::Established => {
                 match packet.header.space() {
-                    SpaceId::Data => {
-                        self.process_payload(now, remote, number.unwrap(), packet.payload.freeze())?
-                    }
+                    SpaceId::Data => self.process_payload(
+                        now,
+                        remote,
+                        number.unwrap(),
+                        &packet.header,
+                        packet.payload.freeze(),
+                    )?,
                     _ => self.process_early_payload(now, packet)?,
                 }
                 return Ok(());
@@ -2348,7 +2360,13 @@ impl Connection {
                 ty: LongType::ZeroRtt,
                 ..
             } => {
-                self.process_payload(now, remote, number.unwrap(), packet.payload.freeze())?;
+                self.process_payload(
+                    now,
+                    remote,
+                    number.unwrap(),
+                    &packet.header,
+                    packet.payload.freeze(),
+                )?;
                 Ok(())
             }
             Header::VersionNegotiate { .. } => {
@@ -2429,16 +2447,230 @@ impl Connection {
         Ok(())
     }
 
+    #[pluginop_result_param(po = "PluginOp::ProcessFrame", param = "ty")]
+    fn process_frame_internal(
+        &mut self,
+        ty: u64,
+        frame: frame::Frame,
+        hdr: &Header,
+        recv_path_id: usize,
+        epoch: SpaceId,
+        now: Instant,
+        remote: SocketAddr,
+        payload_len: usize,
+        number: u64,
+    ) -> Result<(), TransportError> {
+        match frame {
+            Frame::Invalid { ty, reason } => {
+                let mut err = TransportError::FRAME_ENCODING_ERROR(reason);
+                err.frame = Some(ty);
+                return Err(err);
+            }
+            Frame::Crypto(frame) => {
+                self.read_crypto(SpaceId::Data, &frame, payload_len)?;
+            }
+            Frame::Stream(frame) => {
+                if self.streams.received(frame, payload_len)?.should_transmit() {
+                    self.spaces[SpaceId::Data].pending.max_data = true;
+                }
+            }
+            Frame::Ack(ack) => {
+                self.on_ack_received(now, SpaceId::Data, ack)?;
+            }
+            Frame::Padding | Frame::Ping => {}
+            Frame::Close(reason) => {
+                self.error = Some(reason.into());
+                self.state = State::Draining;
+                self.close = true;
+            }
+            Frame::PathChallenge(token) => {
+                if self
+                    .path_response
+                    .as_ref()
+                    .map_or(true, |x| x.packet <= number)
+                {
+                    self.path_response = Some(PathResponse {
+                        packet: number,
+                        token,
+                    });
+                }
+                if remote == self.path.remote {
+                    // PATH_CHALLENGE on active path, possible off-path packet forwarding
+                    // attack. Send a non-probing packet to recover the active path.
+                    self.ping();
+                }
+            }
+            Frame::PathResponse(token) => {
+                if self.path.challenge == Some(token) && remote == self.path.remote {
+                    trace!("new path validated");
+                    self.timers.stop(Timer::PathValidation);
+                    self.path.challenge = None;
+                    self.path.validated = true;
+                    if let Some(ref mut prev_path) = self.prev_path {
+                        prev_path.challenge = None;
+                        prev_path.challenge_pending = false;
+                    }
+                } else {
+                    debug!(token, "ignoring invalid PATH_RESPONSE");
+                }
+            }
+            Frame::MaxData(bytes) => {
+                self.streams.received_max_data(bytes);
+            }
+            Frame::MaxStreamData { id, offset } => {
+                self.streams.received_max_stream_data(id, offset)?;
+            }
+            Frame::MaxStreams { dir, count } => {
+                self.streams.received_max_streams(dir, count)?;
+            }
+            Frame::ResetStream(frame) => {
+                if self.streams.received_reset(frame)?.should_transmit() {
+                    self.spaces[SpaceId::Data].pending.max_data = true;
+                }
+            }
+            Frame::DataBlocked { offset } => {
+                debug!(offset, "peer claims to be blocked at connection level");
+            }
+            Frame::StreamDataBlocked { id, offset } => {
+                if id.initiator() == self.side && id.dir() == Dir::Uni {
+                    debug!("got STREAM_DATA_BLOCKED on send-only {}", id);
+                    return Err(TransportError::STREAM_STATE_ERROR(
+                        "STREAM_DATA_BLOCKED on send-only stream",
+                    ));
+                }
+                debug!(
+                    stream = %id,
+                    offset, "peer claims to be blocked at stream level"
+                );
+            }
+            Frame::StreamsBlocked { dir, limit } => {
+                if limit > MAX_STREAM_COUNT {
+                    return Err(TransportError::FRAME_ENCODING_ERROR(
+                        "unrepresentable stream limit",
+                    ));
+                }
+                debug!(
+                    "peer claims to be blocked opening more than {} {} streams",
+                    limit, dir
+                );
+            }
+            Frame::StopSending(frame::StopSending { id, error_code }) => {
+                if id.initiator() != self.side {
+                    if id.dir() == Dir::Uni {
+                        debug!("got STOP_SENDING on recv-only {}", id);
+                        return Err(TransportError::STREAM_STATE_ERROR(
+                            "STOP_SENDING on recv-only stream",
+                        ));
+                    }
+                } else if self.streams.is_local_unopened(id) {
+                    return Err(TransportError::STREAM_STATE_ERROR(
+                        "STOP_SENDING on unopened stream",
+                    ));
+                }
+                self.streams.received_stop_sending(id, error_code);
+            }
+            Frame::RetireConnectionId { sequence } => {
+                let allow_more_cids = self
+                    .local_cid_state
+                    .on_cid_retirement(sequence, self.peer_params.issue_cids_limit())?;
+                self.endpoint_events
+                    .push_back(EndpointEventInner::RetireConnectionId(
+                        now,
+                        sequence,
+                        allow_more_cids,
+                    ));
+            }
+            Frame::NewConnectionId(frame) => {
+                trace!(
+                    sequence = frame.sequence,
+                    id = %frame.id,
+                    retire_prior_to = frame.retire_prior_to,
+                );
+                if self.rem_cids.active().is_empty() {
+                    return Err(TransportError::PROTOCOL_VIOLATION(
+                        "NEW_CONNECTION_ID when CIDs aren't in use",
+                    ));
+                }
+                if frame.retire_prior_to > frame.sequence {
+                    return Err(TransportError::PROTOCOL_VIOLATION(
+                        "NEW_CONNECTION_ID retiring unissued CIDs",
+                    ));
+                }
+
+                use crate::cid_queue::InsertError;
+                match self.rem_cids.insert(frame) {
+                    Ok(None) => {}
+                    Ok(Some((retired, reset_token))) => {
+                        self.spaces[SpaceId::Data]
+                            .pending
+                            .retire_cids
+                            .extend(retired);
+                        self.set_reset_token(reset_token);
+                    }
+                    Err(InsertError::ExceedsLimit) => {
+                        return Err(TransportError::CONNECTION_ID_LIMIT_ERROR(""));
+                    }
+                    Err(InsertError::Retired) => {
+                        trace!("discarding already-retired");
+                        // RETIRE_CONNECTION_ID might not have been previously sent if e.g. a
+                        // range of connection IDs larger than the active connection ID limit
+                        // was retired all at once via retire_prior_to.
+                        self.spaces[SpaceId::Data]
+                            .pending
+                            .retire_cids
+                            .push(frame.sequence);
+                        return Ok(());
+                    }
+                };
+
+                if self.side.is_server() && self.rem_cids.active_seq() == 0 {
+                    // We're a server still using the initial remote CID for the client, so
+                    // let's switch immediately to enable clientside stateless resets.
+                    self.update_rem_cid();
+                }
+            }
+            Frame::NewToken { token } => {
+                if self.side.is_server() {
+                    return Err(TransportError::PROTOCOL_VIOLATION("client sent NEW_TOKEN"));
+                }
+                if token.is_empty() {
+                    return Err(TransportError::FRAME_ENCODING_ERROR("empty token"));
+                }
+                trace!("got new token");
+                // TODO: Cache, or perhaps forward to user?
+            }
+            Frame::Datagram(datagram) => {
+                if self
+                    .datagrams
+                    .received(datagram, &self.config.datagram_receive_buffer_size)?
+                {
+                    self.events.push_back(Event::DatagramReceived);
+                }
+            }
+            Frame::HandshakeDone => {
+                if self.side.is_server() {
+                    return Err(TransportError::PROTOCOL_VIOLATION(
+                        "client sent HANDSHAKE_DONE",
+                    ));
+                }
+                if self.spaces[SpaceId::Handshake].crypto.is_some() {
+                    self.discard_space(now, SpaceId::Handshake);
+                }
+            }
+        };
+        Ok(())
+    }
+
     fn process_payload(
         &mut self,
         now: Instant,
         remote: SocketAddr,
         number: u64,
+        header: &Header,
         payload: Bytes,
     ) -> Result<(), TransportError> {
         let is_0rtt = self.spaces[SpaceId::Data].crypto.is_none();
         let mut is_probing_packet = true;
-        let mut close = None;
         let payload_len = payload.len();
         let mut ack_eliciting = false;
         for frame in frame::Iter::new(payload) {
@@ -2488,202 +2720,18 @@ impl Connection {
                     is_probing_packet = false;
                 }
             }
-            match frame {
-                Frame::Invalid { ty, reason } => {
-                    let mut err = TransportError::FRAME_ENCODING_ERROR(reason);
-                    err.frame = Some(ty);
-                    return Err(err);
-                }
-                Frame::Crypto(frame) => {
-                    self.read_crypto(SpaceId::Data, &frame, payload_len)?;
-                }
-                Frame::Stream(frame) => {
-                    if self.streams.received(frame, payload_len)?.should_transmit() {
-                        self.spaces[SpaceId::Data].pending.max_data = true;
-                    }
-                }
-                Frame::Ack(ack) => {
-                    self.on_ack_received(now, SpaceId::Data, ack)?;
-                }
-                Frame::Padding | Frame::Ping => {}
-                Frame::Close(reason) => {
-                    close = Some(reason);
-                }
-                Frame::PathChallenge(token) => {
-                    if self
-                        .path_response
-                        .as_ref()
-                        .map_or(true, |x| x.packet <= number)
-                    {
-                        self.path_response = Some(PathResponse {
-                            packet: number,
-                            token,
-                        });
-                    }
-                    if remote == self.path.remote {
-                        // PATH_CHALLENGE on active path, possible off-path packet forwarding
-                        // attack. Send a non-probing packet to recover the active path.
-                        self.ping();
-                    }
-                }
-                Frame::PathResponse(token) => {
-                    if self.path.challenge == Some(token) && remote == self.path.remote {
-                        trace!("new path validated");
-                        self.timers.stop(Timer::PathValidation);
-                        self.path.challenge = None;
-                        self.path.validated = true;
-                        if let Some(ref mut prev_path) = self.prev_path {
-                            prev_path.challenge = None;
-                            prev_path.challenge_pending = false;
-                        }
-                    } else {
-                        debug!(token, "ignoring invalid PATH_RESPONSE");
-                    }
-                }
-                Frame::MaxData(bytes) => {
-                    self.streams.received_max_data(bytes);
-                }
-                Frame::MaxStreamData { id, offset } => {
-                    self.streams.received_max_stream_data(id, offset)?;
-                }
-                Frame::MaxStreams { dir, count } => {
-                    self.streams.received_max_streams(dir, count)?;
-                }
-                Frame::ResetStream(frame) => {
-                    if self.streams.received_reset(frame)?.should_transmit() {
-                        self.spaces[SpaceId::Data].pending.max_data = true;
-                    }
-                }
-                Frame::DataBlocked { offset } => {
-                    debug!(offset, "peer claims to be blocked at connection level");
-                }
-                Frame::StreamDataBlocked { id, offset } => {
-                    if id.initiator() == self.side && id.dir() == Dir::Uni {
-                        debug!("got STREAM_DATA_BLOCKED on send-only {}", id);
-                        return Err(TransportError::STREAM_STATE_ERROR(
-                            "STREAM_DATA_BLOCKED on send-only stream",
-                        ));
-                    }
-                    debug!(
-                        stream = %id,
-                        offset, "peer claims to be blocked at stream level"
-                    );
-                }
-                Frame::StreamsBlocked { dir, limit } => {
-                    if limit > MAX_STREAM_COUNT {
-                        return Err(TransportError::FRAME_ENCODING_ERROR(
-                            "unrepresentable stream limit",
-                        ));
-                    }
-                    debug!(
-                        "peer claims to be blocked opening more than {} {} streams",
-                        limit, dir
-                    );
-                }
-                Frame::StopSending(frame::StopSending { id, error_code }) => {
-                    if id.initiator() != self.side {
-                        if id.dir() == Dir::Uni {
-                            debug!("got STOP_SENDING on recv-only {}", id);
-                            return Err(TransportError::STREAM_STATE_ERROR(
-                                "STOP_SENDING on recv-only stream",
-                            ));
-                        }
-                    } else if self.streams.is_local_unopened(id) {
-                        return Err(TransportError::STREAM_STATE_ERROR(
-                            "STOP_SENDING on unopened stream",
-                        ));
-                    }
-                    self.streams.received_stop_sending(id, error_code);
-                }
-                Frame::RetireConnectionId { sequence } => {
-                    let allow_more_cids = self
-                        .local_cid_state
-                        .on_cid_retirement(sequence, self.peer_params.issue_cids_limit())?;
-                    self.endpoint_events
-                        .push_back(EndpointEventInner::RetireConnectionId(
-                            now,
-                            sequence,
-                            allow_more_cids,
-                        ));
-                }
-                Frame::NewConnectionId(frame) => {
-                    trace!(
-                        sequence = frame.sequence,
-                        id = %frame.id,
-                        retire_prior_to = frame.retire_prior_to,
-                    );
-                    if self.rem_cids.active().is_empty() {
-                        return Err(TransportError::PROTOCOL_VIOLATION(
-                            "NEW_CONNECTION_ID when CIDs aren't in use",
-                        ));
-                    }
-                    if frame.retire_prior_to > frame.sequence {
-                        return Err(TransportError::PROTOCOL_VIOLATION(
-                            "NEW_CONNECTION_ID retiring unissued CIDs",
-                        ));
-                    }
-
-                    use crate::cid_queue::InsertError;
-                    match self.rem_cids.insert(frame) {
-                        Ok(None) => {}
-                        Ok(Some((retired, reset_token))) => {
-                            self.spaces[SpaceId::Data]
-                                .pending
-                                .retire_cids
-                                .extend(retired);
-                            self.set_reset_token(reset_token);
-                        }
-                        Err(InsertError::ExceedsLimit) => {
-                            return Err(TransportError::CONNECTION_ID_LIMIT_ERROR(""));
-                        }
-                        Err(InsertError::Retired) => {
-                            trace!("discarding already-retired");
-                            // RETIRE_CONNECTION_ID might not have been previously sent if e.g. a
-                            // range of connection IDs larger than the active connection ID limit
-                            // was retired all at once via retire_prior_to.
-                            self.spaces[SpaceId::Data]
-                                .pending
-                                .retire_cids
-                                .push(frame.sequence);
-                            continue;
-                        }
-                    };
-
-                    if self.side.is_server() && self.rem_cids.active_seq() == 0 {
-                        // We're a server still using the initial remote CID for the client, so
-                        // let's switch immediately to enable clientside stateless resets.
-                        self.update_rem_cid();
-                    }
-                }
-                Frame::NewToken { token } => {
-                    if self.side.is_server() {
-                        return Err(TransportError::PROTOCOL_VIOLATION("client sent NEW_TOKEN"));
-                    }
-                    if token.is_empty() {
-                        return Err(TransportError::FRAME_ENCODING_ERROR("empty token"));
-                    }
-                    trace!("got new token");
-                    // TODO: Cache, or perhaps forward to user?
-                }
-                Frame::Datagram(datagram) => {
-                    if self
-                        .datagrams
-                        .received(datagram, &self.config.datagram_receive_buffer_size)?
-                    {
-                        self.events.push_back(Event::DatagramReceived);
-                    }
-                }
-                Frame::HandshakeDone => {
-                    if self.side.is_server() {
-                        return Err(TransportError::PROTOCOL_VIOLATION(
-                            "client sent HANDSHAKE_DONE",
-                        ));
-                    }
-                    if self.spaces[SpaceId::Handshake].crypto.is_some() {
-                        self.discard_space(now, SpaceId::Handshake);
-                    }
-                }
-            }
+            let ty = frame.ty().into();
+            self.process_frame_internal(
+                ty,
+                frame,
+                header,
+                0,
+                header.space(),
+                now,
+                remote,
+                payload_len,
+                number,
+            )?;
         }
 
         self.spaces[SpaceId::Data]
@@ -2699,12 +2747,6 @@ impl Connection {
             if self.streams.take_max_streams_dirty(dir) {
                 pending.max_stream_id[dir as usize] = true;
             }
-        }
-
-        if let Some(reason) = close {
-            self.error = Some(reason.into());
-            self.state = State::Draining;
-            self.close = true;
         }
 
         if remote != self.path.remote
@@ -3266,11 +3308,91 @@ impl Connection {
     }
 }
 
-impl fmt::Debug for Connection {
+impl fmt::Debug for CoreConnection {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Connection")
             .field("handshake_cid", &self.handshake_cid)
             .finish()
+    }
+}
+
+use pluginop::api::ToPluginizableConnection;
+use pluginop::PluginizableConnection;
+use std::ops::Deref;
+use std::ops::DerefMut;
+use std::path::PathBuf;
+
+fn exports_func(
+    _: &mut pluginop::Store,
+    _: &pluginop::FunctionEnv<pluginop::plugin::Env<CoreConnection>>,
+) -> pluginop::Exports {
+    pluginop::Exports::new()
+}
+
+/// The pluginizable quinn QUIC connection.
+pub struct Connection(Box<PluginizableConnection<CoreConnection>>);
+
+impl Connection {
+    pub(crate) fn new(
+        endpoint_config: Arc<EndpointConfig>,
+        server_config: Option<Arc<ServerConfig>>,
+        config: Arc<TransportConfig>,
+        init_cid: ConnectionId,
+        loc_cid: ConnectionId,
+        rem_cid: ConnectionId,
+        remote: SocketAddr,
+        local_ip: Option<IpAddr>,
+        crypto: Box<dyn crypto::Session>,
+        cid_gen: &dyn ConnectionIdGenerator,
+        now: Instant,
+        version: u32,
+        allow_mtud: bool,
+    ) -> Self {
+        let conn = CoreConnection::new(
+            endpoint_config,
+            server_config,
+            config,
+            init_cid,
+            loc_cid,
+            rem_cid,
+            remote,
+            local_ip,
+            crypto,
+            cid_gen,
+            now,
+            version,
+            allow_mtud,
+        );
+
+        Connection::new_with_core_quinn(conn)
+    }
+
+    fn new_with_core_quinn(conn: CoreConnection) -> Connection {
+        let mut pc = PluginizableConnection::new_pluginizable_connection(exports_func, conn);
+
+        let pc_ptr = &mut *pc as *mut _;
+        pc.get_conn_mut().set_pluginizable_connection(pc_ptr);
+        pc.get_ph_mut().set_pluginizable_connection(pc_ptr);
+        Connection(pc)
+    }
+
+    /// Insert a plugin.
+    pub fn insert_plugin(&mut self, plugin_fname: &PathBuf) -> Result<(), pluginop::Error> {
+        self.0.ph.insert_plugin(plugin_fname)
+    }
+}
+
+impl Deref for Connection {
+    type Target = CoreConnection;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.get_conn()
+    }
+}
+
+impl DerefMut for Connection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.get_conn_mut()
     }
 }
 

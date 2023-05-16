@@ -1,4 +1,4 @@
-use std::{fmt, num::TryFromIntError, sync::Arc, time::Duration};
+use std::{fmt, num::TryFromIntError, path::PathBuf, sync::Arc, time::Duration};
 
 use thiserror::Error;
 
@@ -48,6 +48,8 @@ pub struct TransportConfig {
     pub(crate) datagram_send_buffer_size: usize,
 
     pub(crate) congestion_controller_factory: Box<dyn congestion::ControllerFactory + Send + Sync>,
+
+    pub(crate) plugin_paths: Vec<PathBuf>,
 }
 
 impl TransportConfig {
@@ -291,6 +293,12 @@ impl TransportConfig {
         self.congestion_controller_factory = Box::new(factory);
         self
     }
+
+    /// The plugin paths to apply to the connection.
+    pub fn set_plugin_paths(&mut self, paths: &[PathBuf]) -> &mut Self {
+        self.plugin_paths = paths.to_vec();
+        self
+    }
 }
 
 impl Default for TransportConfig {
@@ -325,6 +333,8 @@ impl Default for TransportConfig {
             datagram_send_buffer_size: 1024 * 1024,
 
             congestion_controller_factory: Box::new(Arc::new(congestion::CubicConfig::default())),
+
+            plugin_paths: Vec::new(),
         }
     }
 }
@@ -361,6 +371,7 @@ impl fmt::Debug for TransportConfig {
             )
             .field("datagram_send_buffer_size", &self.datagram_send_buffer_size)
             .field("congestion_controller_factory", &"[ opaque ]")
+            .field("plugin_paths", &self.plugin_paths)
             .finish()
     }
 }
