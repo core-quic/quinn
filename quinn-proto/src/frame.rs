@@ -5,10 +5,17 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use pluginop::plugin::CursorBytesPtr;
+use pluginop::TryIntoWithPH;
+use pluginop::{
+    api::ToPluginizableConnection, common::PluginOp, IntoWithPH, ParentReferencer,
+    PluginizableConnection,
+};
 use tinyvec::TinyVec;
 
 use crate::{
     coding::{self, BufExt, BufMutExt, UnexpectedEnd},
+    connection::CoreConnection,
     range_set::ArrayRangeSet,
     shared::{ConnectionId, EcnCodepoint},
     Dir, ResetToken, StreamId, TransportError, TransportErrorCode, VarInt, MAX_CID_SIZE,
@@ -165,6 +172,7 @@ pub(crate) enum Frame {
     Datagram(Datagram),
     Invalid { ty: Type, reason: &'static str },
     HandshakeDone,
+    Extension { frame_type: u64, tag: u64 },
 }
 
 impl Frame {
@@ -205,6 +213,7 @@ impl Frame {
             Datagram(_) => Type(*DATAGRAM_TYS.start()),
             Invalid { ty, .. } => ty,
             HandshakeDone => Type::HANDSHAKE_DONE,
+            Extension { frame_type, .. } => Type(frame_type),
         }
     }
 
@@ -525,6 +534,19 @@ pub(crate) struct Iter {
     // TODO: ditch io::Cursor after bytes 0.5
     bytes: io::Cursor<Bytes>,
     last_ty: Option<Type>,
+    pc: Option<ParentReferencer<PluginizableConnection<CoreConnection>>>,
+}
+
+impl ToPluginizableConnection<CoreConnection> for Iter {
+    fn set_pluginizable_connection(&mut self, pc: *mut PluginizableConnection<CoreConnection>) {
+        self.pc = Some(ParentReferencer::new(pc));
+    }
+
+    fn get_pluginizable_connection(
+        &mut self,
+    ) -> Option<&mut PluginizableConnection<CoreConnection>> {
+        self.pc.as_deref_mut()
+    }
 }
 
 enum IterErr {
@@ -551,10 +573,14 @@ impl From<UnexpectedEnd> for IterErr {
 }
 
 impl Iter {
-    pub(crate) fn new(payload: Bytes) -> Self {
+    pub(crate) fn new(
+        payload: Bytes,
+        pc: Option<&mut PluginizableConnection<CoreConnection>>,
+    ) -> Self {
         Self {
             bytes: io::Cursor::new(payload),
             last_ty: None,
+            pc: pc.map(|v| ParentReferencer::new(v)),
         }
     }
 
@@ -711,6 +737,35 @@ impl Iter {
                             self.take_remaining()
                         },
                     })
+                } else if let Some(ph) =
+                    self.pc
+                        .as_deref_mut()
+                        .map(|pc| pc.get_ph_mut())
+                        .filter(|ph| {
+                            ph.provides(
+                                &PluginOp::ParseFrame(ty.into()),
+                                pluginop::common::Anchor::Replace,
+                            )
+                        })
+                {
+                    // Need to do this by hand.
+                    let params = &[CursorBytesPtr::from(&mut self.bytes).into_with_ph(ph)];
+                    let res = ph.call(&PluginOp::ParseFrame(ty.into()), params);
+                    ph.clear_bytes_content();
+
+                    let mut it = match res {
+                        Ok(r) => r.into_iter(),
+                        Err(pluginop::Error::OperationError(e)) => {
+                            // TODO
+                            println!("Operation error {e}");
+                            return Err(IterErr::InvalidFrameId);
+                        }
+                        Err(err) => panic!("plugin execution error: {:?}", err),
+                    };
+                    match it.next() {
+                        Some(r) => r.try_into_with_ph(ph).unwrap(),
+                        None => panic!("Missing output from the plugin"),
+                    }
                 } else {
                     return Err(IterErr::InvalidFrameId);
                 }
@@ -897,7 +952,7 @@ mod test {
             ce: 12,
         };
         Ack::encode(42, &ranges, Some(&ECN), &mut buf);
-        let frames = Iter::new(Bytes::from(buf)).collect::<Vec<_>>();
+        let frames = Iter::new(Bytes::from(buf), None).collect::<Vec<_>>();
         assert_eq!(frames.len(), 1);
         match frames[0] {
             Frame::Ack(ref ack) => {

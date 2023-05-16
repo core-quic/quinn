@@ -1,10 +1,13 @@
 use pluginop::{
     api::{CTPError, ConnectionToPlugin, ToPluginizableConnection},
     common::{
-        quic::{ConnectionField, Frame, Header, HeaderExt, KPacketNumberSpace, MaxDataFrame, QVal},
+        quic::{
+            ConnectionField, ExtensionFrame, Frame, Header, HeaderExt, KPacketNumberSpace,
+            MaxDataFrame, QVal,
+        },
         PluginVal,
     },
-    FromWithPH,
+    FromWithPH, TryFromWithPH,
 };
 
 use crate::{frame, packet, transport_error};
@@ -53,7 +56,7 @@ impl ConnectionToPlugin for CoreConnection {
     }
 }
 
-impl ToPluginizableConnection<CoreConnection> for CoreConnection {
+impl ToPluginizableConnection<Self> for CoreConnection {
     fn set_pluginizable_connection(&mut self, pc: *mut pluginop::PluginizableConnection<Self>) {
         self.pc = Some(pluginop::ParentReferencer::new(pc));
 
@@ -92,10 +95,16 @@ impl<CTP: ConnectionToPlugin> FromWithPH<frame::Frame, CTP> for PluginVal {
             frame::Frame::PathResponse(_) => todo!(),
             frame::Frame::Close(_) => todo!(),
             frame::Frame::Datagram(_) => todo!(),
-            frame::Frame::Invalid { ty: _, reason: _ } => todo!(),
+            frame::Frame::Invalid { ty, reason } => {
+                println!("{} {}", ty, reason);
+                todo!()
+            }
             frame::Frame::HandshakeDone => todo!(),
+            frame::Frame::Extension { frame_type, tag } => {
+                Frame::Extension(ExtensionFrame { frame_type, tag })
+            }
         };
-        PluginVal::QUIC(QVal::Frame(frame))
+        Self::QUIC(QVal::Frame(frame))
     }
 }
 
@@ -154,7 +163,7 @@ impl<CTP: ConnectionToPlugin> FromWithPH<packet::Header, CTP> for PluginVal {
                 dst_cid: _,
             } => todo!(),
         };
-        PluginVal::QUIC(QVal::Header(hdr))
+        Self::QUIC(QVal::Header(hdr))
     }
 }
 
@@ -165,12 +174,40 @@ impl<CTP: ConnectionToPlugin> FromWithPH<packet::SpaceId, CTP> for PluginVal {
             packet::SpaceId::Handshake => KPacketNumberSpace::Handshake,
             packet::SpaceId::Data => KPacketNumberSpace::ApplicationData,
         };
-        PluginVal::QUIC(QVal::PacketNumberSpace(pns))
+        Self::QUIC(QVal::PacketNumberSpace(pns))
     }
 }
 
 impl From<i64> for transport_error::Error {
     fn from(_value: i64) -> Self {
         todo!()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TryFromCoreQuinnError {
+    BadFrame,
+}
+
+impl<CTP: ConnectionToPlugin> TryFromWithPH<PluginVal, CTP> for frame::Frame {
+    type Error = TryFromCoreQuinnError;
+
+    fn try_from_with_ph(
+        value: PluginVal,
+        _ph: &pluginop::handler::PluginHandler<CTP>,
+    ) -> Result<Self, Self::Error> {
+        let f = if let PluginVal::QUIC(QVal::Frame(f)) = value {
+            f
+        } else {
+            return Err(TryFromCoreQuinnError::BadFrame);
+        };
+        let quinn_frame = match f {
+            Frame::Extension(e) => Self::Extension {
+                frame_type: e.frame_type,
+                tag: e.tag,
+            },
+            _ => todo!(),
+        };
+        Ok(quinn_frame)
     }
 }

@@ -10,8 +10,14 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use frame::StreamMetaVec;
-use pluginop::common::PluginOp;
 use pluginop::pluginop_macro::pluginop_result_param;
+use pluginop::{
+    common::{
+        quic::{FrameSendOrder, Registration},
+        PluginOp,
+    },
+    pluginop_macro::pluginop_param,
+};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
@@ -748,7 +754,8 @@ impl CoreConnection {
                 break;
             }
 
-            let sent = self.populate_packet(space_id, &mut buf, buf_capacity - builder.tag_len);
+            let sent =
+                self.populate_packet(space_id, &mut buf, buf_capacity - builder.tag_len, now);
 
             // ACK-only packets should only be sent when explicitly allowed. If we write them due
             // to any other reason, there is a bug which leads to one component announcing write
@@ -1347,6 +1354,9 @@ impl CoreConnection {
             for (id, _) in retransmits.reset_stream.iter() {
                 self.streams.reset_acked(*id);
             }
+            for f in retransmits.extension.iter() {
+                self.notify_frame(f.ty().into(), f, false);
+            }
         }
 
         for frame in info.stream_frames {
@@ -1497,6 +1507,11 @@ impl CoreConnection {
                 self.remove_in_flight(pn_space, &info);
                 for frame in info.stream_frames {
                     self.streams.retransmit(frame);
+                }
+                if let Some(r) = info.retransmits.get() {
+                    for f in r.extension.iter() {
+                        self.notify_frame(f.ty().into(), f, true);
+                    }
                 }
                 self.spaces[pn_space].pending |= info.retransmits;
                 self.path.mtud.on_non_probe_lost(*packet, info.size);
@@ -2154,7 +2169,7 @@ impl CoreConnection {
                 return Ok(());
             }
             State::Closed(_) => {
-                for frame in frame::Iter::new(packet.payload.freeze()) {
+                for frame in frame::Iter::new(packet.payload.freeze(), self.pc.as_deref_mut()) {
                     if let Frame::Padding = frame {
                         continue;
                     };
@@ -2401,7 +2416,7 @@ impl CoreConnection {
         debug_assert_ne!(packet.header.space(), SpaceId::Data);
         let payload_len = packet.payload.len();
         let mut ack_eliciting = false;
-        for frame in frame::Iter::new(packet.payload.freeze()) {
+        for frame in frame::Iter::new(packet.payload.freeze(), self.pc.as_deref_mut()) {
             let span = match frame {
                 Frame::Padding => continue,
                 _ => Some(trace_span!("frame", ty = %frame.ty())),
@@ -2657,6 +2672,7 @@ impl CoreConnection {
                     self.discard_space(now, SpaceId::Handshake);
                 }
             }
+            Frame::Extension { .. } => unreachable!(),
         };
         Ok(())
     }
@@ -2673,7 +2689,7 @@ impl CoreConnection {
         let mut is_probing_packet = true;
         let payload_len = payload.len();
         let mut ack_eliciting = false;
-        for frame in frame::Iter::new(payload) {
+        for frame in frame::Iter::new(payload, self.pc.as_deref_mut()) {
             let span = match frame {
                 Frame::Padding => continue,
                 _ => Some(trace_span!("frame", ty = %frame.ty())),
@@ -2848,15 +2864,133 @@ impl CoreConnection {
             .push_back(EndpointEventInner::NeedIdentifiers(now, n));
     }
 
+    #[pluginop_param(po = "PluginOp::ShouldSendFrame", param = "ty")]
+    fn should_send_frame(
+        &mut self,
+        ty: u64,
+        pkt_type: pluginop::common::quic::PacketType,
+        space_id: SpaceId,
+        is_closed: bool,
+        left: usize,
+        now: Instant,
+    ) -> bool {
+        false
+    }
+
+    #[pluginop_result_param(po = "PluginOp::PrepareFrame", param = "ty")]
+    fn prepare_frame(
+        &mut self,
+        ty: u64,
+        space: SpaceId,
+        left: usize,
+    ) -> Result<frame::Frame, PrepareFrameError> {
+        Err(PrepareFrameError::Done)
+    }
+
+    #[pluginop_param(po = "PluginOp::WireLen", param = "ty")]
+    fn wire_len(&mut self, ty: u64, frame: &frame::Frame) -> usize {
+        0
+    }
+
+    fn write_frame(
+        &mut self,
+        ty: u64,
+        frame: &frame::Frame,
+        buf: &mut BytesMut,
+    ) -> Result<usize, i64> {
+        // FIXME: it is currently possible to have a plugin that writes more that it should... This is
+        // due to the implementation of Bytes.
+        // TODO: adapt the macro to make it work with BytesMut.
+        use pluginop::plugin::BytesMutPtr;
+        use pluginop::IntoWithPH;
+        use pluginop::TryIntoWithPH;
+        let ph = self.get_pluginizable_connection().map(|pc| pc.get_ph_mut());
+        if let Some(ph) = ph
+            .filter(|ph| ph.provides(&PluginOp::WriteFrame(ty), pluginop::common::Anchor::Replace))
+        {
+            let params = &[
+                frame.clone().into_with_ph(ph),
+                BytesMutPtr::from(buf).into_with_ph(ph),
+            ];
+            let res = ph.call(&PluginOp::WriteFrame(ty), params);
+            ph.clear_bytes_content();
+
+            let mut it = match res {
+                Ok(r) => r.into_iter(),
+                Err(pluginop::Error::OperationError(e)) => return Err(e),
+                Err(err) => panic!("plugin execution error: {:?}", err),
+            };
+            match it.next() {
+                Some(r) => Ok(r.try_into_with_ph(ph).unwrap()),
+                None => panic!("Missing output from the plugin"),
+            }
+        } else {
+            Err(-1)
+        }
+    }
+
+    #[pluginop_param(po = "PluginOp::OnFrameReserved", param = "ty")]
+    fn on_frame_reserved(&mut self, ty: u64, frame: &frame::Frame) {}
+
+    #[pluginop_param(po = "PluginOp::NotifyFrame", param = "ty")]
+    fn notify_frame(&mut self, ty: u64, frame: &frame::Frame, is_lost: bool) {}
+
     fn populate_packet(
         &mut self,
         space_id: SpaceId,
         buf: &mut BytesMut,
         max_size: usize,
+        now: Instant,
     ) -> SentFrames {
+        let registrations = self
+            .get_pluginizable_connection()
+            .map(|pc| pc.get_ph().get_registrations().to_vec())
+            .unwrap_or_default();
         let mut sent = SentFrames::default();
         let space = &mut self.spaces[space_id];
         let is_0rtt = space_id == SpaceId::Data && space.crypto.is_none();
+
+        for f in registrations
+            .iter()
+            .filter_map(|r| {
+                if let Registration::Frame(f) = r {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
+            .filter(|f| f.send_order() == FrameSendOrder::First)
+        {
+            let ty = f.get_type();
+            // Harcoded pkt_type, should revisit this argument as it can be retrieved from epoch.
+            if self.should_send_frame(
+                ty,
+                pluginop::common::quic::PacketType::Short,
+                space_id,
+                self.state.is_closed(),
+                max_size - buf.len(),
+                now,
+            ) {
+                let frame = match self.prepare_frame(ty, space_id, max_size - buf.len()) {
+                    Ok(f) => f,
+                    Err(PrepareFrameError::Done) => continue,
+                    Err(PrepareFrameError::SuspendSendingProcess) => return sent,
+                    Err(e) => panic!("need to handle error {:?}", e),
+                };
+                if self.wire_len(ty, &frame) <= max_size - buf.len() {
+                    match self.write_frame(ty, &frame, buf) {
+                        Ok(_) => {
+                            self.on_frame_reserved(ty, &frame);
+                            // TODO: ack eliciting or count in flight not taken into account.
+                            sent.retransmits.get_or_create().extension.push(frame);
+                        }
+                        Err(_) => continue,
+                    }
+                }
+            }
+        }
+
+        let space = &mut self.spaces[space_id];
 
         // HANDSHAKE_DONE
         if !is_0rtt && mem::replace(&mut space.pending.handshake_done, false) {
@@ -3364,16 +3498,16 @@ impl Connection {
             allow_mtud,
         );
 
-        Connection::new_with_core_quinn(conn)
+        Self::new_with_core_quinn(conn)
     }
 
-    fn new_with_core_quinn(conn: CoreConnection) -> Connection {
+    fn new_with_core_quinn(conn: CoreConnection) -> Self {
         let mut pc = PluginizableConnection::new_pluginizable_connection(exports_func, conn);
 
         let pc_ptr = &mut *pc as *mut _;
         pc.get_conn_mut().set_pluginizable_connection(pc_ptr);
         pc.get_ph_mut().set_pluginizable_connection(pc_ptr);
-        Connection(pc)
+        Self(pc)
     }
 
     /// Insert a plugin.
@@ -3621,5 +3755,22 @@ impl SentFrames {
             && !self.non_retransmits
             && self.stream_frames.is_empty()
             && self.retransmits.is_empty(streams)
+    }
+}
+
+#[derive(Debug)]
+enum PrepareFrameError {
+    Done,
+    SuspendSendingProcess,
+    Other(i64),
+}
+
+impl From<i64> for PrepareFrameError {
+    fn from(value: i64) -> Self {
+        match value {
+            -1 => Self::Done,
+            -1000 => Self::SuspendSendingProcess,
+            v => Self::Other(v),
+        }
     }
 }

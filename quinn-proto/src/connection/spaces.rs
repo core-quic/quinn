@@ -234,6 +234,7 @@ pub struct Retransmits {
     pub(super) new_cids: Vec<IssuedCid>,
     pub(super) retire_cids: Vec<u64>,
     pub(super) handshake_done: bool,
+    pub(super) extension: Vec<frame::Frame>,
 }
 
 impl Retransmits {
@@ -250,6 +251,7 @@ impl Retransmits {
             && self.new_cids.is_empty()
             && self.retire_cids.is_empty()
             && !self.handshake_done
+            && self.extension.is_empty()
     }
 }
 
