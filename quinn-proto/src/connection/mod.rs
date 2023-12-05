@@ -361,7 +361,10 @@ impl CoreConnection {
     /// - a call was made to `handle_timeout`
     #[must_use]
     pub fn poll_timeout(&mut self) -> Option<Instant> {
-        self.timers.next_timeout()
+        let ph_to = self.get_pluginizable_connection().and_then(|pc| pc.get_ph().timeout());
+        let conn_to = self.timers.next_timeout();
+        let timers = [ph_to, conn_to];
+        timers.iter().filter_map(|&x| x).min()
     }
 
     /// Returns application-facing events
@@ -754,8 +757,11 @@ impl CoreConnection {
                 break;
             }
 
-            let sent =
-                self.populate_packet(space_id, &mut buf, buf_capacity - builder.tag_len, now);
+            let sent = match
+                self.populate_packet(space_id, &mut buf, buf_capacity - builder.tag_len, now) {
+                    Some(s) => s,
+                    None => return None,
+                };
 
             // ACK-only packets should only be sent when explicitly allowed. If we write them due
             // to any other reason, there is a bug which leads to one component announcing write
@@ -973,6 +979,13 @@ impl CoreConnection {
     /// `Instant` that was output by `poll_timeout`; however spurious extra calls will simply
     /// no-op and therefore are safe.
     pub fn handle_timeout(&mut self, now: Instant) {
+        if let Some(ph) = self.get_pluginizable_connection().and_then(|pc| Some(pc.get_ph_mut())) {
+            if let Some(t) = ph.timeout() {
+                if t <= now {
+                    ph.on_timeout(t).ok();
+                }
+            }
+        }
         for &timer in &Timer::VALUES {
             if !self.timers.is_expired(timer, now) {
                 continue;
@@ -2170,7 +2183,7 @@ impl CoreConnection {
             }
             State::Closed(_) => {
                 for frame in frame::Iter::new(packet.payload.freeze(), self.pc.as_deref_mut()) {
-                    if let Frame::Padding = frame {
+                    if let Frame::Padding(_) = frame {
                         continue;
                     };
 
@@ -2418,7 +2431,7 @@ impl CoreConnection {
         let mut ack_eliciting = false;
         for frame in frame::Iter::new(packet.payload.freeze(), self.pc.as_deref_mut()) {
             let span = match frame {
-                Frame::Padding => continue,
+                Frame::Padding(_) => continue,
                 _ => Some(trace_span!("frame", ty = %frame.ty())),
             };
 
@@ -2429,7 +2442,7 @@ impl CoreConnection {
 
             // Process frames
             match frame {
-                Frame::Padding | Frame::Ping => {}
+                Frame::Padding(_) | Frame::Ping => {}
                 Frame::Crypto(frame) => {
                     self.read_crypto(packet.header.space(), &frame, payload_len)?;
                 }
@@ -2492,7 +2505,7 @@ impl CoreConnection {
             Frame::Ack(ack) => {
                 self.on_ack_received(now, SpaceId::Data, ack)?;
             }
-            Frame::Padding | Frame::Ping => {}
+            Frame::Padding(_) | Frame::Ping => {}
             Frame::Close(reason) => {
                 self.error = Some(reason.into());
                 self.state = State::Draining;
@@ -2691,7 +2704,7 @@ impl CoreConnection {
         let mut ack_eliciting = false;
         for frame in frame::Iter::new(payload, self.pc.as_deref_mut()) {
             let span = match frame {
-                Frame::Padding => continue,
+                Frame::Padding(_) => continue,
                 _ => Some(trace_span!("frame", ty = %frame.ty())),
             };
 
@@ -2728,7 +2741,7 @@ impl CoreConnection {
 
             // Check whether this could be a probing packet
             match frame {
-                Frame::Padding
+                Frame::Padding(_)
                 | Frame::PathChallenge(_)
                 | Frame::PathResponse(_)
                 | Frame::NewConnectionId(_) => {}
@@ -2941,7 +2954,7 @@ impl CoreConnection {
         buf: &mut BytesMut,
         max_size: usize,
         now: Instant,
-    ) -> SentFrames {
+    ) -> Option<SentFrames> {
         let registrations = self
             .get_pluginizable_connection()
             .map(|pc| pc.get_ph().get_registrations().to_vec())
@@ -2974,7 +2987,7 @@ impl CoreConnection {
                 let frame = match self.prepare_frame(ty, space_id, max_size - buf.len()) {
                     Ok(f) => f,
                     Err(PrepareFrameError::Done) => continue,
-                    Err(PrepareFrameError::SuspendSendingProcess) => return sent,
+                    Err(PrepareFrameError::SuspendSendingProcess) => return None,
                     Err(e) => panic!("need to handle error {:?}", e),
                 };
                 if self.wire_len(ty, &frame) <= max_size - buf.len() {
@@ -3014,6 +3027,48 @@ impl CoreConnection {
             debug_assert!(!space.pending_acks.ranges().is_empty());
             Self::populate_acks(self.receiving_ecn, &mut sent, space, buf, &mut self.stats);
         }
+
+        for f in registrations
+            .iter()
+            .filter_map(|r| {
+                if let Registration::Frame(f) = r {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
+            .filter(|f| f.send_order() == FrameSendOrder::AfterACK)
+        {
+            let ty = f.get_type();
+            // Harcoded pkt_type, should revisit this argument as it can be retrieved from epoch.
+            if self.should_send_frame(
+                ty,
+                pluginop::common::quic::PacketType::Short,
+                space_id,
+                self.state.is_closed(),
+                max_size - buf.len(),
+                now,
+            ) {
+                let frame = match self.prepare_frame(ty, space_id, max_size - buf.len()) {
+                    Ok(f) => f,
+                    Err(PrepareFrameError::Done) => continue,
+                    Err(PrepareFrameError::SuspendSendingProcess) => return None,
+                    Err(e) => panic!("need to handle error {:?}", e),
+                };
+                if self.wire_len(ty, &frame) <= max_size - buf.len() {
+                    match self.write_frame(ty, &frame, buf) {
+                        Ok(_) => {
+                            self.on_frame_reserved(ty, &frame);
+                            // TODO: ack eliciting or count in flight not taken into account.
+                            sent.retransmits.get_or_create().extension.push(frame);
+                        }
+                        Err(_) => continue,
+                    }
+                }
+            }
+        }
+
+        let space = &mut self.spaces[space_id];
 
         // PATH_CHALLENGE
         if buf.len() + 9 < max_size && space_id == SpaceId::Data {
@@ -3146,7 +3201,47 @@ impl CoreConnection {
             self.stats.frame_tx.stream += sent.stream_frames.len() as u64;
         }
 
-        sent
+        for f in registrations
+            .iter()
+            .filter_map(|r| {
+                if let Registration::Frame(f) = r {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
+            .filter(|f| f.send_order() == FrameSendOrder::End)
+        {
+            let ty = f.get_type();
+            // Harcoded pkt_type, should revisit this argument as it can be retrieved from epoch.
+            if self.should_send_frame(
+                ty,
+                pluginop::common::quic::PacketType::Short,
+                space_id,
+                self.state.is_closed(),
+                max_size - buf.len(),
+                now,
+            ) {
+                let frame = match self.prepare_frame(ty, space_id, max_size - buf.len()) {
+                    Ok(f) => f,
+                    Err(PrepareFrameError::Done) => continue,
+                    Err(PrepareFrameError::SuspendSendingProcess) => return None,
+                    Err(e) => panic!("need to handle error {:?}", e),
+                };
+                if self.wire_len(ty, &frame) <= max_size - buf.len() {
+                    match self.write_frame(ty, &frame, buf) {
+                        Ok(_) => {
+                            self.on_frame_reserved(ty, &frame);
+                            // TODO: ack eliciting or count in flight not taken into account.
+                            sent.retransmits.get_or_create().extension.push(frame);
+                        }
+                        Err(_) => continue,
+                    }
+                }
+            }
+        }
+
+        Some(sent)
     }
 
     /// Write pending ACKs into a buffer

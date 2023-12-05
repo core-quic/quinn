@@ -10,6 +10,7 @@ use pluginop::TryIntoWithPH;
 use pluginop::{
     api::ToPluginizableConnection, common::PluginOp, IntoWithPH, ParentReferencer,
     PluginizableConnection,
+    pluginop_macro::pluginop_result_param,
 };
 use tinyvec::TinyVec;
 
@@ -150,7 +151,7 @@ const DATAGRAM_TYS: RangeInclusive<u64> = RangeInclusive::new(0x30, 0x31);
 
 #[derive(Debug, Clone)]
 pub(crate) enum Frame {
-    Padding,
+    Padding(u64),
     Ping,
     Ack(Ack),
     ResetStream(ResetStream),
@@ -179,7 +180,7 @@ impl Frame {
     pub(crate) fn ty(&self) -> Type {
         use self::Frame::*;
         match *self {
-            Padding => Type::PADDING,
+            Padding(_) => Type::PADDING,
             ResetStream(_) => Type::RESET_STREAM,
             Close(self::Close::Connection(_)) => Type::CONNECTION_CLOSE,
             Close(self::Close::Application(_)) => Type::APPLICATION_CLOSE,
@@ -218,7 +219,7 @@ impl Frame {
     }
 
     pub(crate) fn is_ack_eliciting(&self) -> bool {
-        !matches!(*self, Self::Ack(_) | Self::Padding | Self::Close(_))
+        !matches!(*self, Self::Ack(_) | Self::Padding(_) | Self::Close(_))
     }
 }
 
@@ -566,6 +567,12 @@ impl IterErr {
     }
 }
 
+impl From<i64> for IterErr {
+    fn from(_: i64) -> Self {
+        Self::Malformed
+    }
+}
+
 impl From<UnexpectedEnd> for IterErr {
     fn from(_: UnexpectedEnd) -> Self {
         Self::UnexpectedEnd
@@ -594,12 +601,11 @@ impl Iter {
         Ok(self.bytes.get_ref().slice(start..(start + len as usize)))
     }
 
-    fn try_next(&mut self) -> Result<Frame, IterErr> {
-        // PARSE HERE!!!
-        let ty = self.bytes.get::<Type>()?;
-        self.last_ty = Some(ty);
+    #[pluginop_result_param(po = "PluginOp::ParseFrame", param = "ty")]
+    fn parse_frame(&mut self, ty: u64) -> Result<Frame, IterErr> {
+        let ty = Type(ty);
         Ok(match ty {
-            Type::PADDING => Frame::Padding,
+            Type::PADDING => Frame::Padding(1),
             Type::RESET_STREAM => Frame::ResetStream(ResetStream {
                 id: self.bytes.get()?,
                 error_code: self.bytes.get()?,
@@ -771,6 +777,13 @@ impl Iter {
                 }
             }
         })
+    }
+
+    fn try_next(&mut self) -> Result<Frame, IterErr> {
+        // PARSE HERE!!!
+        let ty = self.bytes.get::<Type>()?;
+        self.last_ty = Some(ty);
+        self.parse_frame(ty.0)
     }
 
     fn take_remaining(&mut self) -> Bytes {

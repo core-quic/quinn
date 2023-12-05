@@ -3,7 +3,7 @@ use pluginop::{
     common::{
         quic::{
             ConnectionField, ExtensionFrame, Frame, Header, HeaderExt, KPacketNumberSpace,
-            MaxDataFrame, QVal,
+            MaxDataFrame, QVal, PaddingFrame,
         },
         PluginVal,
     },
@@ -22,7 +22,8 @@ impl ConnectionToPlugin for CoreConnection {
     ) -> bincode::Result<()> {
         let pv: PluginVal = match field {
             ConnectionField::MaxTxData => self.streams.max_data().into(),
-            _ => todo!(),
+            ConnectionField::IsEstablished => self.state.is_established().into(),
+            f => todo!("{f:?}"),
         };
         bincode::serialize_into(w, &pv)
     }
@@ -73,7 +74,7 @@ impl ToPluginizableConnection<Self> for CoreConnection {
 impl<CTP: ConnectionToPlugin> FromWithPH<frame::Frame, CTP> for PluginVal {
     fn from_with_ph(value: frame::Frame, _ph: &mut pluginop::handler::PluginHandler<CTP>) -> Self {
         let frame = match value {
-            frame::Frame::Padding => todo!(),
+            frame::Frame::Padding(l) => Frame::Padding(PaddingFrame { length: l }),
             frame::Frame::Ping => todo!(),
             frame::Frame::Ack(_) => todo!(),
             frame::Frame::ResetStream(_) => todo!(),
@@ -206,7 +207,8 @@ impl<CTP: ConnectionToPlugin> TryFromWithPH<PluginVal, CTP> for frame::Frame {
                 frame_type: e.frame_type,
                 tag: e.tag,
             },
-            _ => todo!(),
+            Frame::Padding(p) => Self::Padding(p.length),
+            f => todo!("{f:?}"),
         };
         Ok(quinn_frame)
     }
