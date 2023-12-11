@@ -46,6 +46,7 @@ thiserror = "1.0.21"
 tracing = "0.1.10"
 tokio = { version = "1.28.1", features = ["sync"] }
 udp = { package = "quinn-udp", path = "../quinn-udp", version = "0.4", default-features = false }
+pluginop = { path = "../../pluginop/lib" }
 
 [dev-dependencies]
 anyhow = "1.0.22"

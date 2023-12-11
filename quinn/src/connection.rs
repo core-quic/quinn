@@ -12,6 +12,7 @@ use std::{
 use crate::runtime::{AsyncTimer, Runtime};
 use bytes::Bytes;
 use pin_project_lite::pin_project;
+use pluginop::common::PluginVal;
 use proto::{ConnectionError, ConnectionHandle, ConnectionStats, Dir, StreamEvent, StreamId};
 use rustc_hash::FxHashMap;
 use thiserror::Error;
@@ -568,6 +569,12 @@ impl Connection {
         conn.inner.set_max_concurrent_streams(Dir::Bi, count);
         // May need to send MAX_STREAMS to make progress
         conn.wake();
+    }
+
+    /// Performs plugin operation.
+    pub fn poctl(&self, id: u64, params: &[PluginVal]) -> Result<Vec<PluginVal>, pluginop::Error> {
+        let mut conn = self.0.state.lock("poctl");
+        conn.inner.poctl(id, params)
     }
 }
 

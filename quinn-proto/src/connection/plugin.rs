@@ -1,16 +1,17 @@
+use bytes::Buf;
 use pluginop::{
     api::{CTPError, ConnectionToPlugin, ToPluginizableConnection},
     common::{
         quic::{
             ConnectionField, ExtensionFrame, Frame, Header, HeaderExt, KPacketNumberSpace,
-            MaxDataFrame, QVal, PaddingFrame,
+            MaxDataFrame, PaddingFrame, PathChallengeFrame, PathResponseFrame, QVal,
         },
-        PluginVal,
+        Bytes, PluginVal,
     },
     FromWithPH, TryFromWithPH,
 };
 
-use crate::{frame, packet, transport_error};
+use crate::{frame, packet, transport_error, Side};
 
 use super::CoreConnection;
 
@@ -23,6 +24,7 @@ impl ConnectionToPlugin for CoreConnection {
         let pv: PluginVal = match field {
             ConnectionField::MaxTxData => self.streams.max_data().into(),
             ConnectionField::IsEstablished => self.state.is_established().into(),
+            ConnectionField::IsServer => (self.side() == Side::Server).into(),
             f => todo!("{f:?}"),
         };
         bincode::serialize_into(w, &pv)
@@ -76,7 +78,32 @@ impl<CTP: ConnectionToPlugin> FromWithPH<frame::Frame, CTP> for PluginVal {
         let frame = match value {
             frame::Frame::Padding(l) => Frame::Padding(PaddingFrame { length: l }),
             frame::Frame::Ping => todo!(),
-            frame::Frame::Ack(_) => todo!(),
+            frame::Frame::Ack(a) => {
+                let mut ar_cnt = 0;
+                let mut first_range = a.largest;
+                let mut first = true;
+                for range in a.iter() {
+                    if !first {
+                        ar_cnt += 1;
+                    } else {
+                        first_range = *range.start();
+                    }
+                    // TODO: store ranges.
+                    first = false;
+                }
+                Frame::ACK(pluginop::common::quic::ACKFrame {
+                    largest_acknowledged: a.largest,
+                    ack_delay: a.delay,
+                    ack_range_count: ar_cnt,
+                    first_ack_range: first_range,
+                    ack_ranges: Bytes {
+                        tag: 99,
+                        max_read_len: 0,
+                        max_write_len: 0,
+                    },
+                    ecn_counts: None,
+                })
+            }
             frame::Frame::ResetStream(_) => todo!(),
             frame::Frame::StopSending(_) => todo!(),
             frame::Frame::Crypto(_) => todo!(),
@@ -92,8 +119,8 @@ impl<CTP: ConnectionToPlugin> FromWithPH<frame::Frame, CTP> for PluginVal {
             frame::Frame::StreamsBlocked { dir: _, limit: _ } => todo!(),
             frame::Frame::NewConnectionId(_) => todo!(),
             frame::Frame::RetireConnectionId { sequence: _ } => todo!(),
-            frame::Frame::PathChallenge(_) => todo!(),
-            frame::Frame::PathResponse(_) => todo!(),
+            frame::Frame::PathChallenge(data) => Frame::PathChallenge(PathChallengeFrame { data }),
+            frame::Frame::PathResponse(data) => Frame::PathResponse(PathResponseFrame { data }),
             frame::Frame::Close(_) => todo!(),
             frame::Frame::Datagram(_) => todo!(),
             frame::Frame::Invalid { ty, reason } => {
@@ -208,6 +235,7 @@ impl<CTP: ConnectionToPlugin> TryFromWithPH<PluginVal, CTP> for frame::Frame {
                 tag: e.tag,
             },
             Frame::Padding(p) => Self::Padding(p.length),
+            Frame::PathChallenge(pc) => Self::PathChallenge(pc.data),
             f => todo!("{f:?}"),
         };
         Ok(quinn_frame)

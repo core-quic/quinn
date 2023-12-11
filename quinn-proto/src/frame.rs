@@ -8,9 +8,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use pluginop::plugin::CursorBytesPtr;
 use pluginop::TryIntoWithPH;
 use pluginop::{
-    api::ToPluginizableConnection, common::PluginOp, IntoWithPH, ParentReferencer,
-    PluginizableConnection,
-    pluginop_macro::pluginop_result_param,
+    api::ToPluginizableConnection, common::PluginOp, pluginop_macro::pluginop_result_param,
+    IntoWithPH, ParentReferencer, PluginizableConnection,
 };
 use tinyvec::TinyVec;
 

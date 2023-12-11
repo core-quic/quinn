@@ -6,6 +6,7 @@ use std::{
     fs,
     io::{self, Write},
     net::ToSocketAddrs,
+    option,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -43,6 +44,10 @@ struct Opt {
     /// The plugins to load.
     #[clap(long = "plugin")]
     plugin_paths: Vec<PathBuf>,
+
+    /// Whether we should call a pluginop.
+    #[clap(long = "poctl")]
+    poctl: bool,
 }
 
 fn main() {
@@ -131,6 +136,11 @@ async fn run(options: Opt) -> Result<()> {
         let addr = socket.local_addr().unwrap();
         eprintln!("rebinding to {addr}");
         endpoint.rebind(socket).expect("rebind failed");
+    }
+
+    if options.poctl {
+        conn.poctl(1, &[])
+            .expect("probe-path plugin must be loaded");
     }
 
     send.write_all(request.as_bytes())

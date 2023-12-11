@@ -10,7 +10,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use frame::StreamMetaVec;
-use pluginop::pluginop_macro::pluginop_result_param;
+use pluginop::{common::PluginVal, pluginop_macro::pluginop_result_param};
 use pluginop::{
     common::{
         quic::{FrameSendOrder, Registration},
@@ -361,7 +361,9 @@ impl CoreConnection {
     /// - a call was made to `handle_timeout`
     #[must_use]
     pub fn poll_timeout(&mut self) -> Option<Instant> {
-        let ph_to = self.get_pluginizable_connection().and_then(|pc| pc.get_ph().timeout());
+        let ph_to = self
+            .get_pluginizable_connection()
+            .and_then(|pc| pc.get_ph().timeout());
         let conn_to = self.timers.next_timeout();
         let timers = [ph_to, conn_to];
         timers.iter().filter_map(|&x| x).min()
@@ -757,8 +759,9 @@ impl CoreConnection {
                 break;
             }
 
-            let sent = match
-                self.populate_packet(space_id, &mut buf, buf_capacity - builder.tag_len, now) {
+            let sent =
+                match self.populate_packet(space_id, &mut buf, buf_capacity - builder.tag_len, now)
+                {
                     Some(s) => s,
                     None => return None,
                 };
@@ -979,7 +982,7 @@ impl CoreConnection {
     /// `Instant` that was output by `poll_timeout`; however spurious extra calls will simply
     /// no-op and therefore are safe.
     pub fn handle_timeout(&mut self, now: Instant) {
-        if let Some(ph) = self.get_pluginizable_connection().and_then(|pc| Some(pc.get_ph_mut())) {
+        if let Some(ph) = self.get_pluginizable_connection().map(|pc| pc.get_ph_mut()) {
             if let Some(t) = ph.timeout() {
                 if t <= now {
                     ph.on_timeout(t).ok();
@@ -3608,6 +3611,15 @@ impl Connection {
     /// Insert a plugin.
     pub fn insert_plugin(&mut self, plugin_fname: &PathBuf) -> Result<(), pluginop::Error> {
         self.0.ph.insert_plugin(plugin_fname)
+    }
+
+    /// Perform plugin operation.
+    pub fn poctl(
+        &mut self,
+        id: u64,
+        params: &[PluginVal],
+    ) -> Result<Vec<PluginVal>, pluginop::Error> {
+        self.0.ph.poctl(id, params)
     }
 }
 
