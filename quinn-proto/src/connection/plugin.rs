@@ -1,4 +1,3 @@
-use bytes::Buf;
 use pluginop::{
     api::{CTPError, ConnectionToPlugin, ToPluginizableConnection},
     common::{

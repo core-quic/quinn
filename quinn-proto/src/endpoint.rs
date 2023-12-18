@@ -19,7 +19,7 @@ use crate::{
     cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator},
     coding::BufMutExt,
     config::{ClientConfig, EndpointConfig, ServerConfig},
-    connection::{Connection, ConnectionError},
+    connection::{Connection, ConnectionError, create_tls_pc},
     crypto::{self, Keys, UnsupportedVersion},
     frame,
     packet::{Header, Packet, PacketDecodeError, PacketNumber, PartialDecode},
@@ -393,9 +393,28 @@ impl Endpoint {
             loc_cid,
             None,
         );
+
+        let mut ptls = create_tls_pc();
+
+        for pfname in &config.transport.plugin_paths {
+            ptls.ph.insert_plugin(pfname).expect("cannot insert plugin");
+        }
+
+        // Let us generate now the extension transport parameters.
+        let registrations = ptls.ph.get_registrations().to_vec();
+        use pluginop::IntoWithPH;
+        use pluginop::plugin::BytesMutPtr;
+        let mut buf = BytesMut::with_capacity(64);
+        registrations.iter().for_each(|r| {
+            if let pluginop::common::quic::Registration::TransportParameter(tp) = r {
+                let params = &[BytesMutPtr::from(&mut buf).into_with_ph(&mut ptls.ph)];
+                ptls.ph.call(&pluginop::common::PluginOp::WriteTransportParameter(*tp), params).ok();
+            }
+        });
+
         let tls = config
             .crypto
-            .start_session(config.version, server_name, &params)?;
+            .start_session(config.version, server_name, &params, Some(&buf))?;
 
         let (ch, conn) = self.add_connection(
             config.version,
@@ -594,7 +613,22 @@ impl Endpoint {
         params.original_dst_cid = Some(orig_dst_cid);
         params.retry_src_cid = retry_src_cid;
 
-        let tls = server_config.crypto.clone().start_session(version, &params);
+        let mut ptls = create_tls_pc();
+        for pfname in &server_config.transport.plugin_paths {
+            ptls.ph.insert_plugin(pfname).expect("cannot insert plugin");
+        }
+        // Let us generate now the extension transport parameters.
+        let registrations = ptls.ph.get_registrations().to_vec();
+        use pluginop::IntoWithPH;
+        use pluginop::plugin::BytesMutPtr;
+        let mut buf = BytesMut::with_capacity(64);
+        registrations.iter().for_each(|r| {
+            if let pluginop::common::quic::Registration::TransportParameter(tp) = r {
+                let params = &[BytesMutPtr::from(&mut buf).into_with_ph(&mut ptls.ph)];
+                ptls.ph.call(&pluginop::common::PluginOp::WriteTransportParameter(*tp), params).ok();
+            }
+        });
+        let tls = server_config.crypto.clone().start_session(version, &params, Some(&buf));
         let transport_config = server_config.transport.clone();
         let (ch, mut conn) = self.add_connection(
             version,
@@ -653,6 +687,7 @@ impl Endpoint {
             version,
             self.allow_mtud,
         );
+
         for pfname in &transport_config.plugin_paths {
             conn.insert_plugin(pfname).expect("cannot insert plugin");
         }

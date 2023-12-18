@@ -67,6 +67,9 @@ pub trait Session: Send + 'static {
     /// These are only available after the first flight from the peer has been received.
     fn transport_parameters(&self) -> Result<Option<TransportParameters>, TransportError>;
 
+    /// Raw transport parameters.
+    fn raw_transport_parameters(&self) -> Option<&[u8]>;
+
     /// Writes handshake bytes into the given buffer and optionally returns the negotiated keys
     ///
     /// When the handshake proceeds to the next phase, this method will return a new set of
@@ -117,6 +120,7 @@ pub trait ClientConfig: Send + Sync {
         version: u32,
         server_name: &str,
         params: &TransportParameters,
+        extended_raw_params: Option<&[u8]>,
     ) -> Result<Box<dyn Session>, ConnectError>;
 }
 
@@ -142,6 +146,7 @@ pub trait ServerConfig: Send + Sync {
         self: Arc<Self>,
         version: u32,
         params: &TransportParameters,
+        extended_raw_params: Option<&[u8]>,
     ) -> Box<dyn Session>;
 }
 

@@ -97,6 +97,10 @@ impl crypto::Session for NoProtectionSession {
         self.inner.transport_parameters()
     }
 
+    fn raw_transport_parameters(&self) -> Option<&[u8]> {
+        self.inner.raw_transport_parameters()
+    }
+
     fn write_handshake(&mut self, buf: &mut Vec<u8>) -> Option<crypto::Keys> {
         let keys = self.inner.write_handshake(buf)?;
 
@@ -131,11 +135,12 @@ impl crypto::ClientConfig for NoProtectionClientConfig {
         version: u32,
         server_name: &str,
         params: &transport_parameters::TransportParameters,
+        extended_raw_params: Option<&[u8]>,
     ) -> Result<Box<dyn crypto::Session>, quinn::ConnectError> {
         let tls = self
             .inner
             .clone()
-            .start_session(version, server_name, params)?;
+            .start_session(version, server_name, params, extended_raw_params)?;
 
         Ok(Box::new(NoProtectionSession::new(tls)))
     }
@@ -159,8 +164,9 @@ impl crypto::ServerConfig for NoProtectionServerConfig {
         self: Arc<Self>,
         version: u32,
         params: &transport_parameters::TransportParameters,
+        extended_raw_params: Option<&[u8]>,
     ) -> Box<dyn crypto::Session> {
-        let tls = self.inner.clone().start_session(version, params);
+        let tls = self.inner.clone().start_session(version, params, extended_raw_params);
 
         Box::new(NoProtectionSession::new(tls))
     }

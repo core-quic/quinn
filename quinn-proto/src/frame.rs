@@ -8,7 +8,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use pluginop::plugin::CursorBytesPtr;
 use pluginop::TryIntoWithPH;
 use pluginop::{
-    api::ToPluginizableConnection, common::PluginOp, pluginop_macro::pluginop_result_param,
+    api::ToPluginizableConnection, common::PluginOp,
     IntoWithPH, ParentReferencer, PluginizableConnection,
 };
 use tinyvec::TinyVec;
@@ -567,7 +567,8 @@ impl IterErr {
 }
 
 impl From<i64> for IterErr {
-    fn from(_: i64) -> Self {
+    fn from(i: i64) -> Self {
+        println!("ERROR: {}", i);
         Self::Malformed
     }
 }
@@ -600,7 +601,6 @@ impl Iter {
         Ok(self.bytes.get_ref().slice(start..(start + len as usize)))
     }
 
-    #[pluginop_result_param(po = "PluginOp::ParseFrame", param = "ty")]
     fn parse_frame(&mut self, ty: u64) -> Result<Frame, IterErr> {
         let ty = Type(ty);
         Ok(match ty {
@@ -802,6 +802,7 @@ impl Iterator for Iter {
         match self.try_next() {
             Ok(x) => Some(x),
             Err(e) => {
+                println!("{}", e.reason());
                 // Corrupt frame, skip it and everything that follows
                 self.bytes = io::Cursor::new(Bytes::new());
                 Some(Frame::Invalid {

@@ -120,6 +120,10 @@ impl crypto::Session for TlsSession {
         }
     }
 
+    fn raw_transport_parameters(&self) -> Option<&[u8]> {
+        self.inner.quic_transport_parameters()
+    }
+
     fn write_handshake(&mut self, buf: &mut Vec<u8>) -> Option<Keys> {
         let keys = match self.inner.write_hs(buf)? {
             KeyChange::Handshake { keys } => keys,
@@ -252,6 +256,7 @@ impl crypto::ClientConfig for rustls::ClientConfig {
         version: u32,
         server_name: &str,
         params: &TransportParameters,
+        extended_raw_params: Option<&[u8]>,
     ) -> Result<Box<dyn crypto::Session>, ConnectError> {
         let version = interpret_version(version)?;
         Ok(Box::new(TlsSession {
@@ -265,7 +270,7 @@ impl crypto::ClientConfig for rustls::ClientConfig {
                     server_name
                         .try_into()
                         .map_err(|_| ConnectError::InvalidDnsName(server_name.into()))?,
-                    to_vec(params),
+                    to_vec(params, extended_raw_params),
                 )
                 .unwrap(),
             ),
@@ -278,6 +283,7 @@ impl crypto::ServerConfig for rustls::ServerConfig {
         self: Arc<Self>,
         version: u32,
         params: &TransportParameters,
+        extended_raw_params: Option<&[u8]>,
     ) -> Box<dyn crypto::Session> {
         let version = interpret_version(version).unwrap();
         Box::new(TlsSession {
@@ -285,7 +291,7 @@ impl crypto::ServerConfig for rustls::ServerConfig {
             got_handshake_data: false,
             next_secrets: None,
             inner: rustls::quic::Connection::Server(
-                rustls::quic::ServerConnection::new(self, version, to_vec(params)).unwrap(),
+                rustls::quic::ServerConnection::new(self, version, to_vec(params, extended_raw_params)).unwrap(),
             ),
         })
     }
@@ -325,9 +331,13 @@ impl crypto::ServerConfig for rustls::ServerConfig {
     }
 }
 
-fn to_vec(params: &TransportParameters) -> Vec<u8> {
+fn to_vec(params: &TransportParameters, extended_raw_params: Option<&[u8]>) -> Vec<u8> {
     let mut bytes = Vec::new();
     params.write(&mut bytes);
+    if let Some(extended_raw_params) = extended_raw_params {
+        bytes.extend_from_slice(extended_raw_params);
+    }
+
     bytes
 }
 

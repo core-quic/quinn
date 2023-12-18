@@ -10,7 +10,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use frame::StreamMetaVec;
-use pluginop::{common::PluginVal, pluginop_macro::pluginop_result_param};
+use pluginop::{common::PluginVal, pluginop_macro::pluginop_result_param, TLSBeforeQUIC};
 use pluginop::{
     common::{
         quic::{FrameSendOrder, Registration},
@@ -1778,6 +1778,29 @@ impl CoreConnection {
             None => return,
         };
         if self.side.is_client() {
+            if self.get_pluginizable_connection().is_some() {
+                let tp_bytes = self.crypto.raw_transport_parameters().unwrap().to_vec();
+                let pc = self.get_pluginizable_connection().unwrap();
+                let ph = pc.get_ph_mut();
+                // Double processing, should not harm though.
+                let r = &mut io::Cursor::new(tp_bytes.clone());
+                use bytes::Buf;
+                use crate::coding::BufExt;
+                while r.has_remaining() {
+                    // BAD!
+                    let id = r.get_var().unwrap();
+                    let len = r.get_var().unwrap();
+                    if (r.remaining() as u64) < len {
+                        break;
+                    }
+                    let len = len as usize;
+                    let val = &tp_bytes[r.position() as usize .. r.position() as usize + len];
+                    use pluginop::IntoWithPH;
+                    let params = &[val.to_vec().into_with_ph(ph)];
+                    ph.call(&PluginOp::DecodeTransportParameter(id), params).ok();
+                    r.advance(len);
+                }
+            }
             match self.crypto.transport_parameters() {
                 Ok(params) => {
                     let params = params
@@ -2300,6 +2323,29 @@ impl CoreConnection {
 
                 if self.side.is_client() {
                     // Client-only because server params were set from the client's Initial
+                    if self.get_pluginizable_connection().is_some() {
+                        let tp_bytes = self.crypto.raw_transport_parameters().unwrap().to_vec();
+                        let pc = self.get_pluginizable_connection().unwrap();
+                        let ph = pc.get_ph_mut();
+                        // Double processing, should not harm though.
+                        let r = &mut io::Cursor::new(tp_bytes.clone());
+                        use bytes::Buf;
+                        use crate::coding::BufExt;
+                        while r.has_remaining() {
+                            // BAD!
+                            let id = r.get_var().unwrap();
+                            let len = r.get_var().unwrap();
+                            if (r.remaining() as u64) < len {
+                                break;
+                            }
+                            let len = len as usize;
+                            let val = &tp_bytes[r.position() as usize .. r.position() as usize + len];
+                            use pluginop::IntoWithPH;
+                            let params = &[val.to_vec().into_with_ph(ph)];
+                            ph.call(&PluginOp::DecodeTransportParameter(id), params).ok();
+                            r.advance(len);
+                        }
+                    }
                     let params =
                         self.crypto
                             .transport_parameters()?
@@ -2373,6 +2419,29 @@ impl CoreConnection {
                     && starting_space == SpaceId::Initial
                     && self.highest_space != SpaceId::Initial
                 {
+                    if self.get_pluginizable_connection().is_some() {
+                        let tp_bytes = self.crypto.raw_transport_parameters().unwrap().to_vec();
+                        let pc = self.get_pluginizable_connection().unwrap();
+                        let ph = pc.get_ph_mut();
+                        // Double processing, should not harm though.
+                        let r = &mut io::Cursor::new(tp_bytes.clone());
+                        use bytes::Buf;
+                        use crate::coding::BufExt;
+                        while r.has_remaining() {
+                            // BAD!
+                            let id = r.get_var().unwrap();
+                            let len = r.get_var().unwrap();
+                            if (r.remaining() as u64) < len {
+                                break;
+                            }
+                            let len = len as usize;
+                            let val = &tp_bytes[r.position() as usize .. r.position() as usize + len];
+                            use pluginop::IntoWithPH;
+                            let params = &[val.to_vec().into_with_ph(ph)];
+                            ph.call(&PluginOp::DecodeTransportParameter(id), params).ok();
+                            r.advance(len);
+                        }
+                    }
                     let params =
                         self.crypto
                             .transport_parameters()?
@@ -2965,6 +3034,11 @@ impl CoreConnection {
         let mut sent = SentFrames::default();
         let space = &mut self.spaces[space_id];
         let is_0rtt = space_id == SpaceId::Data && space.crypto.is_none();
+        let pkt_type = match space_id {
+            SpaceId::Initial => pluginop::common::quic::PacketType::Initial,
+            SpaceId::Handshake => pluginop::common::quic::PacketType::Handshake,
+            SpaceId::Data => pluginop::common::quic::PacketType::Short,
+        };
 
         for f in registrations
             .iter()
@@ -2978,10 +3052,9 @@ impl CoreConnection {
             .filter(|f| f.send_order() == FrameSendOrder::First)
         {
             let ty = f.get_type();
-            // Harcoded pkt_type, should revisit this argument as it can be retrieved from epoch.
             if self.should_send_frame(
                 ty,
-                pluginop::common::quic::PacketType::Short,
+                pkt_type,
                 space_id,
                 self.state.is_closed(),
                 max_size - buf.len(),
@@ -3043,10 +3116,9 @@ impl CoreConnection {
             .filter(|f| f.send_order() == FrameSendOrder::AfterACK)
         {
             let ty = f.get_type();
-            // Harcoded pkt_type, should revisit this argument as it can be retrieved from epoch.
             if self.should_send_frame(
                 ty,
-                pluginop::common::quic::PacketType::Short,
+                pkt_type,
                 space_id,
                 self.state.is_closed(),
                 max_size - buf.len(),
@@ -3216,10 +3288,9 @@ impl CoreConnection {
             .filter(|f| f.send_order() == FrameSendOrder::End)
         {
             let ty = f.get_type();
-            // Harcoded pkt_type, should revisit this argument as it can be retrieved from epoch.
             if self.should_send_frame(
                 ty,
-                pluginop::common::quic::PacketType::Short,
+                pkt_type,
                 space_id,
                 self.state.is_closed(),
                 max_size - buf.len(),
@@ -3559,6 +3630,10 @@ fn exports_func(
     _: &pluginop::FunctionEnv<pluginop::plugin::Env<CoreConnection>>,
 ) -> pluginop::Exports {
     pluginop::Exports::new()
+}
+
+pub(crate) fn create_tls_pc() -> Box<TLSBeforeQUIC<CoreConnection>> {
+    pluginop::TLSBeforeQUIC::new(exports_func)
 }
 
 /// The pluginizable quinn QUIC connection.

@@ -6,7 +6,6 @@ use std::{
     fs,
     io::{self, Write},
     net::ToSocketAddrs,
-    option,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
