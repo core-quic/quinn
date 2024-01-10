@@ -485,6 +485,10 @@ impl Controller for Bbr {
         self.cwnd
     }
 
+    fn set_window(&mut self, window: u64) {
+        self.cwnd = window;
+    }
+
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
     }

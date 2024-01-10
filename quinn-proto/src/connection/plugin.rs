@@ -3,7 +3,7 @@ use pluginop::{
     common::{
         quic::{
             ConnectionField, ExtensionFrame, Frame, Header, HeaderExt, KPacketNumberSpace,
-            MaxDataFrame, PaddingFrame, PathChallengeFrame, PathResponseFrame, QVal,
+            MaxDataFrame, PaddingFrame, PathChallengeFrame, PathResponseFrame, QVal, RecoveryField,
         },
         Bytes, PluginVal,
     },
@@ -47,14 +47,23 @@ impl ConnectionToPlugin for CoreConnection {
 
     fn get_recovery(
         &self,
-        _w: &mut [u8],
         _field: pluginop::common::quic::RecoveryField,
+        _w: &mut [u8],
     ) -> bincode::Result<()> {
         todo!()
     }
 
-    fn set_recovery(&mut self, _field: pluginop::common::quic::RecoveryField, _value: &[u8]) {
-        todo!()
+    fn set_recovery(&mut self, field: pluginop::common::quic::RecoveryField, value: &[u8]) -> Result<(), pluginop::api::CTPError> {
+        let pv: PluginVal =
+            bincode::deserialize_from(value).map_err(|_| CTPError::SerializeError)?;
+        match field {
+            RecoveryField::CongestionWindow => self
+                .path
+                .congestion
+                .set_window(usize::try_from(pv).map_err(|_| CTPError::BadType)? as u64),
+            _ => todo!(),
+        };
+        Ok(())
     }
 }
 

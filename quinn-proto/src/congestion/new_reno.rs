@@ -112,6 +112,10 @@ impl Controller for NewReno {
         self.window
     }
 
+    fn set_window(&mut self, window: u64) {
+        self.window = window;
+    }
+
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
     }

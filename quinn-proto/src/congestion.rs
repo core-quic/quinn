@@ -64,6 +64,9 @@ pub trait Controller: Send {
     /// Number of ack-eliciting bytes that may be in flight
     fn window(&self) -> u64;
 
+    /// Force set the number of ack-eliciting bytes that may be in flight
+    fn set_window(&mut self, window: u64);
+
     /// Duplicate the controller's state
     fn clone_box(&self) -> Box<dyn Controller>;
 
