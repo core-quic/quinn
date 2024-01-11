@@ -67,6 +67,9 @@ pub trait Controller: Send {
     /// Force set the number of ack-eliciting bytes that may be in flight
     fn set_window(&mut self, window: u64);
 
+    /// Force set the slow-start threshold, if applicable.
+    fn set_ssthresh(&mut self, ssthresh: u64);
+
     /// Duplicate the controller's state
     fn clone_box(&self) -> Box<dyn Controller>;
 

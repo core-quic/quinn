@@ -226,6 +226,10 @@ impl Controller for Cubic {
         self.window = window;
     }
 
+    fn set_ssthresh(&mut self, ssthresh: u64) {
+        self.ssthresh = ssthresh;
+    }
+
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
     }

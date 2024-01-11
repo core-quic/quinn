@@ -489,6 +489,10 @@ impl Controller for Bbr {
         self.cwnd = window;
     }
 
+    fn set_ssthresh(&mut self, _ssthresh: u64) {
+        // not applicable.
+    }
+
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
     }

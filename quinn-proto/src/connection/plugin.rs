@@ -61,6 +61,10 @@ impl ConnectionToPlugin for CoreConnection {
                 .path
                 .congestion
                 .set_window(usize::try_from(pv).map_err(|_| CTPError::BadType)? as u64),
+            RecoveryField::Ssthresh => self
+                .path
+                .congestion
+                .set_ssthresh(usize::try_from(pv).map_err(|_| CTPError::BadType)? as u64),
             _ => todo!(),
         };
         Ok(())
