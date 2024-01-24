@@ -15,18 +15,18 @@ use crate::{frame, packet, transport_error, Side};
 use super::CoreConnection;
 
 impl ConnectionToPlugin for CoreConnection {
-    fn get_connection(
+    fn get_connection<'a>(
         &self,
         field: pluginop::common::quic::ConnectionField,
-        w: &mut [u8],
-    ) -> bincode::Result<()> {
+        w: &'a mut [u8],
+    ) -> postcard::Result<&'a mut [u8]> {
         let pv: PluginVal = match field {
             ConnectionField::MaxTxData => self.streams.max_data().into(),
             ConnectionField::IsEstablished => self.state.is_established().into(),
             ConnectionField::IsServer => (self.side() == Side::Server).into(),
             f => todo!("{f:?}"),
         };
-        bincode::serialize_into(w, &pv)
+        postcard::to_slice(&pv, w)
     }
 
     fn set_connection(
@@ -35,7 +35,7 @@ impl ConnectionToPlugin for CoreConnection {
         value: &[u8],
     ) -> Result<(), pluginop::api::CTPError> {
         let pv: PluginVal =
-            bincode::deserialize_from(value).map_err(|_| CTPError::SerializeError)?;
+            postcard::from_bytes(value).map_err(|_| CTPError::SerializeError)?;
         match field {
             ConnectionField::MaxTxData => self
                 .streams
@@ -45,17 +45,17 @@ impl ConnectionToPlugin for CoreConnection {
         Ok(())
     }
 
-    fn get_recovery(
+    fn get_recovery<'a>(
         &self,
         _field: pluginop::common::quic::RecoveryField,
-        _w: &mut [u8],
-    ) -> bincode::Result<()> {
+        _w: &'a mut [u8],
+    ) -> postcard::Result<&'a mut [u8]> {
         todo!()
     }
 
     fn set_recovery(&mut self, field: pluginop::common::quic::RecoveryField, value: &[u8]) -> Result<(), pluginop::api::CTPError> {
         let pv: PluginVal =
-            bincode::deserialize_from(value).map_err(|_| CTPError::SerializeError)?;
+            postcard::from_bytes(value).map_err(|_| CTPError::SerializeError)?;
         match field {
             RecoveryField::CongestionWindow => self
                 .path
