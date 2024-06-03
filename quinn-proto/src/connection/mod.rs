@@ -2986,12 +2986,12 @@ impl CoreConnection {
         // FIXME: it is currently possible to have a plugin that writes more that it should... This is
         // due to the implementation of Bytes.
         // TODO: adapt the macro to make it work with BytesMut.
-        use pluginop::plugin::BytesMutPtr;
+        use pluginop::BytesMutPtr;
         use pluginop::IntoWithPH;
         use pluginop::TryIntoWithPH;
         let ph = self.get_pluginizable_connection().map(|pc| pc.get_ph_mut());
         if let Some(ph) = ph
-            .filter(|ph| ph.provides(&PluginOp::WriteFrame(ty), pluginop::common::Anchor::Replace))
+            .filter(|ph| ph.provides(&PluginOp::WriteFrame(ty), pluginop::common::Anchor::Define))
         {
             let params = &[
                 frame.clone().into_with_ph(ph),

@@ -5,7 +5,7 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use pluginop::plugin::CursorBytesPtr;
+use pluginop::CursorBytesPtr;
 use pluginop::TryIntoWithPH;
 use pluginop::{
     api::ToPluginizableConnection, common::PluginOp,
@@ -749,7 +749,7 @@ impl Iter {
                         .filter(|ph| {
                             ph.provides(
                                 &PluginOp::ParseFrame(ty.into()),
-                                pluginop::common::Anchor::Replace,
+                                pluginop::common::Anchor::Define,
                             )
                         })
                 {

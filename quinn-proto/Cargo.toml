@@ -28,7 +28,7 @@ log = ["tracing/log"]
 arbitrary = { version = "1.0.1", features = ["derive"], optional = true }
 postcard = "1"
 bytes = "1"
-pluginop = { path = "../../pluginop/lib" }
+pluginop = "0.1"
 rustc-hash = "1.1"
 rand = "0.8"
 ring = { version = "0.16.7", optional = true }

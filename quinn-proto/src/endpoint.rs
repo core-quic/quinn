@@ -403,7 +403,7 @@ impl Endpoint {
         // Let us generate now the extension transport parameters.
         let registrations = ptls.ph.get_registrations().to_vec();
         use pluginop::IntoWithPH;
-        use pluginop::plugin::BytesMutPtr;
+        use pluginop::BytesMutPtr;
         let mut buf = BytesMut::with_capacity(64);
         registrations.iter().for_each(|r| {
             if let pluginop::common::quic::Registration::TransportParameter(tp) = r {
@@ -620,7 +620,7 @@ impl Endpoint {
         // Let us generate now the extension transport parameters.
         let registrations = ptls.ph.get_registrations().to_vec();
         use pluginop::IntoWithPH;
-        use pluginop::plugin::BytesMutPtr;
+        use pluginop::BytesMutPtr;
         let mut buf = BytesMut::with_capacity(64);
         registrations.iter().for_each(|r| {
             if let pluginop::common::quic::Registration::TransportParameter(tp) = r {

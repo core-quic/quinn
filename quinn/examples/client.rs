@@ -93,17 +93,18 @@ async fn run(options: Opt) -> Result<()> {
             }
         }
     }
-    let mut client_crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    // let mut client_crypto = rustls::ClientConfig::builder()
+    //     .with_safe_defaults()
+    //     .with_root_certificates(roots)
+    //     .with_no_client_auth();
 
-    client_crypto.alpn_protocols = common::ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
-    if options.keylog {
-        client_crypto.key_log = Arc::new(rustls::KeyLogFile::new());
-    }
+    // client_crypto.alpn_protocols = common::ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
+    // if options.keylog {
+    //     client_crypto.key_log = Arc::new(rustls::KeyLogFile::new());
+    // }
 
-    let mut client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
+    // let mut client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
+    let mut client_config = configure_client();
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.set_plugin_paths(&options.plugin_paths);
     client_config.transport_config(Arc::new(transport_config));
@@ -160,8 +161,8 @@ async fn run(options: Opt) -> Result<()> {
         duration,
         resp.len() as f32 / (duration_secs(&duration) * 1024.0)
     );
-    io::stdout().write_all(&resp).unwrap();
-    io::stdout().flush().unwrap();
+    // io::stdout().write_all(&resp).unwrap();
+    // io::stdout().flush().unwrap();
     conn.close(0u32.into(), b"done");
 
     // Give the server a fair chance to receive the close packet
@@ -172,4 +173,37 @@ async fn run(options: Opt) -> Result<()> {
 
 fn duration_secs(x: &Duration) -> f32 {
     x.as_secs() as f32 + x.subsec_nanos() as f32 * 1e-9
+}
+
+// Implementation of `ServerCertVerifier` that verifies everything as trustworthy.
+struct SkipServerVerification;
+
+impl SkipServerVerification {
+    fn new() -> Arc<Self> {
+        Arc::new(Self)
+    }
+}
+
+impl rustls::client::ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::Certificate,
+        _intermediates: &[rustls::Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::ServerCertVerified::assertion())
+    }
+}
+
+fn configure_client() -> quinn::ClientConfig {
+    let mut crypto = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(SkipServerVerification::new())
+        .with_no_client_auth();
+    crypto.alpn_protocols = common::ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
+
+   quinn::ClientConfig::new(Arc::new(crypto))
 }
